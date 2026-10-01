@@ -9,7 +9,7 @@ read_when:
 
 `paste` sends Cmd+V. With no payload, it pastes the current clipboard contents. With text, a file, an image, or base64 data, it temporarily replaces the system clipboard, pastes into the target, then restores the previous clipboard items (or clears it if it was empty) only while it still owns that clipboard generation. A newer copy from the user or another app is preserved instead.
 
-This reduces drift by collapsing multiple CLI steps into one command. Plain text uses direct process-targeted typing in background mode. Rich/current-clipboard payloads use Cmd+V; pass `--foreground` when the caller needs a confirmed command result because macOS does not acknowledge whether a process-targeted Cmd+V was consumed.
+This reduces drift by collapsing multiple CLI steps into one command. Plain text uses direct process-targeted typing in background mode. Rich/current-clipboard payloads use Cmd+V. Pass `--foreground` for intentional foreground delivery; this does not guarantee confirmation that the receiving app consumed the paste.
 
 ## Key options
 | Flag | Description |
@@ -48,12 +48,38 @@ peekaboo paste "Hello, world" --app TextEdit
 # Paste rich text (RTF) into a specific window title
 peekaboo paste --data-base64 "$RTF_B64" --uti public.rtf --also-text "fallback" --app TextEdit --window-title "Untitled"
 
-# Paste a PNG into Notes with a confirmed foreground dispatch result
+# Paste a PNG into Notes using foreground delivery; verify the result afterward
 peekaboo paste --file-path /tmp/snippet.png --app Notes --foreground
 
 # Force foreground paste for apps that ignore background Cmd+V
 peekaboo paste "Hello" --app TextEdit --foreground
 ```
+
+### HTML with formatting and a hyperlink
+
+Use `public.html` to insert a complete rich-text fragment at the current selection. In Notes, this avoids replacing the note's entire HTML body just to add a link. First open a disposable note in its own window, obtain its exact window ID, focus the editor, and place the caret where the fragment should go. Pasting replaces selected text, if any.
+
+```bash
+# Replace this with the observed disposable note's window ID.
+NOTE_WINDOW_ID=12345
+HTML_B64=$(python3 - <<'PY'
+import base64
+
+html = '''<html><head><meta charset="utf-8"></head><body>
+<p><b>Rich paste test</b></p>
+<p><a href="https://example.com/">Example &#8212; linked text</a></p>
+<p><i>Formata&#231;&#227;o preserved.</i></p>
+</body></html>'''
+print(base64.b64encode(html.encode("ascii")).decode("ascii"))
+PY
+)
+peekaboo paste --data-base64 "$HTML_B64" --uti public.html \
+  --app Notes --window-id "$NOTE_WINDOW_ID" --foreground --json
+```
+
+Declare the HTML charset; numeric character references also keep the payload ASCII-safe. For a local-file link, use a properly URL-encoded `file:///absolute/path/to/file` in `href`. The link does not upload or share the file with collaborators.
+
+In a manual Notes test with Peekaboo 4.5.0 on macOS 26.7, an inserted HTML fragment preserved bold, italic, a local-file hyperlink, and existing checked/unchecked items. This tests insertion into an existing note, not reconstruction of native checklists from HTML. The command still returned `INTERACTION_FAILED` even though independent UI inspection confirmed the inserted fragment.
 
 ## Notes
 - Restore delays must be between `0` and `10000ms`, inclusive. Existing CLI scripts or MCP callers using longer delays must reduce them; invalid values fail before clipboard access or input delivery. Direct calls to the shared consumption-wait helper are capped at 10 seconds as a backstop.
@@ -82,6 +108,7 @@ func prepareTemporaryWrite() throws -> any ClipboardTemporaryWriteTransaction {
 A custom backend must return a transaction that records the actual write claim even on partial failure, fences complete prior contents, preserves newer ownership, and performs one-shot cleanup independently of task cancellation. Do not implement this by wrapping the old unconditional restore sequence. Unsupported-provider refusals occur before clipboard reads, focus setup, or paste input; they are not a reason to retry with foreground authority.
 
 ## Troubleshooting
+- `Paste hotkey did not return a confirmed outcome.` does not prove that nothing was pasted, including with `--foreground`. Inspect `mutation_dispatched`, `retry_safe`, and `requires_fresh_observation`, then inspect the exact target's current contents before deciding what to do next. Do not automatically replay a retry-unsafe paste: the fragment may already be present. Foreground focus confirmation and receiver consumption are separate facts.
 - If silent clipboard access is unavailable, arrange the reader's permission deliberately outside automation. An application still at `default` may not yet appear in System Settings because it has never shown a clipboard access alert. Peekaboo does not open settings, manufacture an alert, or change that policy automatically. Allowing the GUI host does not necessarily allow a separate caller-local clipboard reader.
 - If a complete prior snapshot is unavailable, keep the original clipboard intact and resolve the supplying application's unreadable/promised data before trying temporary replacement. Changing foreground mode does not make an incomplete snapshot safe to discard.
 - Verify Screen Recording + Accessibility permissions (`peekaboo permissions status`). Background paste also requires Event Synthesizing access for the sending process; request it with `peekaboo permissions request event-synthesizing`.
